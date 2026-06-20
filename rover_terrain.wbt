@@ -1,0 +1,815 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/rocks/protos/Rock.proto"
+
+WorldInfo {
+  info [
+    "Amphibious Triangular Rover v2"
+    "Full STL visuals - front arm assembly + rear swivel, flat-to-uneven terrain"
+  ]
+  title "Amphibious Rover - Terrain Test"
+  basicTimeStep 16
+  contactProperties [
+    ContactProperties {
+      material1 "wheel"
+      coulombFriction [ 1.5 ]
+      bounce 0.01
+      bounceVelocity 0.001
+      softERP 0.6
+      softCFM 0.0001
+    }
+  ]
+}
+
+Viewpoint {
+  orientation -0.35 0.75 0.56 1.15
+  position 0.8 -1.2 0.7
+  follow "amphibious_rover"
+  followSmoothness 0.5
+  followType "Tracking Shot"
+}
+
+TexturedBackground {
+  texture "mountains"
+}
+
+TexturedBackgroundLight {
+  texture "mountains"
+}
+
+# ── GROUND ────────────────────────────────────────────────────────────────────
+
+Solid {
+  translation 0 0 -0.01
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.72 0.62 0.45
+        roughness 0.95
+        metalness 0
+      }
+      geometry Box { size 6 6 0.02 }
+    }
+  ]
+  boundingObject Box { size 6 6 0.02 }
+  name "flat_ground"
+}
+Rock { translation  1.0  0.4 0.0  scale 0.07  name "rock1" }
+Rock { translation -0.9 -0.7 0.0  scale 0.055 name "rock2" }
+Rock { translation  0.6 -1.1 0.0  scale 0.045 name "rock3" }
+
+# ── ROVER ─────────────────────────────────────────────────────────────────────
+# All STLs in mm → scale 0.001 → metres
+# Mesh URL base: ../protos/meshes/ (relative to worlds/ folder)
+# Front assembly STL origin: arm pivot top at Z≈90mm in assembly space
+#   anchor in body frame: right=(+0.060,+0.035,-0.005) left=(-0.060,+0.035,-0.005)
+# Left arm reuses right-arm STLs with rotation 0 0 1 3.1416 on the Solid
+
+Robot {
+  translation 0 0 0.125
+  rotation 0 0 1 0
+  name "amphibious_rover"
+  model "Amphibious Triangular Rover v2"
+  controller "rover_controller"
+  supervisor FALSE
+
+  children [
+
+    # ── CHASSIS ──────────────────────────────────────────────────────────────
+    # 166x131.9x35 mm, ctr(83, 65.96, 17.5) → offset(-0.083,-0.06596,-0.0175)
+    Transform {
+      translation -0.083 -0.06596 -0.0175
+      scale 0.001 0.001 0.001
+      children [
+        Shape {
+              castShadows FALSE
+          appearance PBRAppearance {
+            baseColor 0.15 0.65 0.55
+            roughness 0.4
+            metalness 0.3
+          }
+          geometry Mesh {
+            url "../protos/meshes/chassis.STL"
+          }
+        }
+      ]
+    }
+
+    # Electronics box
+    Transform {
+      translation 0 0 0.024
+      children [
+        Shape {
+              castShadows FALSE
+          appearance PBRAppearance { baseColor 0.08 0.08 0.1 roughness 0.3 metalness 0.5 }
+          geometry Box { size 0.07 0.08 0.025 }
+        }
+      ]
+    }
+
+    # ── CAMERA ───────────────────────────────────────────────────────────────
+    Transform {
+      translation 0 0.018 0.032
+      rotation 1 0 0 -0.2094
+      children [
+        Camera {
+          width 320
+          height 240
+          fieldOfView 1.047
+          name "camera"
+        }
+        Shape {
+              castShadows FALSE
+          appearance PBRAppearance { baseColor 0.1 0.2 0.85 roughness 0.3 metalness 0.4 }
+          geometry Box { size 0.012 0.012 0.012 }
+        }
+      ]
+    }
+
+    # ── IMU ──────────────────────────────────────────────────────────────────
+    InertialUnit {
+      name "imu"
+      translation 0 0 0
+    }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FRONT-RIGHT ARM + WHEEL
+    # Tilt hinge Y-axis, anchor at rover body (+0.060, +0.035, -0.005)
+    # STL assembly share a common local origin; all offsets = -ctr_mm * 0.001
+    # ═══════════════════════════════════════════════════════════════════════════
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        axis 0 1 0
+        anchor 0.060 0.030 -0.010
+      }
+      device [
+        RotationalMotor {
+          name "front_right_tilt_joint"
+          minPosition -1.5708
+          maxPosition 0.05
+          maxTorque 2.0
+          maxVelocity 0.7854
+        }
+        PositionSensor { name "front_right_tilt_sensor" }
+      ]
+      endPoint Solid {
+        translation 0.060 0.035 -0.005
+        name "front_right_arm"
+        children [
+
+          # arm_1  ctr(55.5, 32.91, 54.81)
+          Transform {
+            translation -0.05550 -0.03291 -0.05481
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.15 0.65 0.55 roughness 0.4 metalness 0.3 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 arm_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # arm_ball_stud  ctr(33.0, 39.41, 63.81)
+          Transform {
+            translation -0.03300 -0.03941 -0.06381
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.7 0.7 0.72 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 arm_ball_stud_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # pivot_bracket  ctr(59.5, 32.91, 84.31)
+          Transform {
+            translation -0.05950 -0.03291 -0.08431
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.25 0.25 0.28 roughness 0.4 metalness 0.6 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 pivot_bracket_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # pivot_pin  ctr(57.0, 32.66, 81.81)
+          Transform {
+            translation -0.05700 -0.03266 -0.08181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.6 0.6 0.65 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 pivot_pin_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # axle  ctr(57.0, 32.91, 31.81)
+          Transform {
+            translation -0.05700 -0.03291 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.65 0.65 0.7 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 axle_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # coupler  ctr(85.5, 32.91, 31.81)
+          Transform {
+            translation -0.08550 -0.03291 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.55 0.55 0.6 roughness 0.3 metalness 0.7 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 coupler_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # motor  ctr(117.5, 32.91, 31.81)
+          Transform {
+            translation -0.11750 -0.03291 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.3 0.3 0.35 roughness 0.3 metalness 0.8 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 motor_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # motor_enc  ctr(122.5, 30.41, 31.81)
+          Transform {
+            translation -0.12250 -0.03041 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.2 0.2 0.25 roughness 0.4 metalness 0.6 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 motor_enc.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # ── FRONT-RIGHT WHEEL HINGE (spin axis = X) ─────────────────────
+          HingeJoint {
+            jointParameters HingeJointParameters {
+              axis 1 0 0
+              anchor 0 0 -0.058
+            }
+            device [
+              RotationalMotor {
+                name "front_right_wheel_joint"
+                maxTorque 0.8
+                maxVelocity 10.472
+              }
+              PositionSensor { name "front_right_wheel_sensor" }
+            ]
+            endPoint Solid {
+              translation 0 0 -0.058
+              name "front_right_wheel"
+              contactMaterial "wheel"
+              children [
+                # wheel_1  ctr(61.0, 32.91, 31.81) — axle already along X
+                Transform {
+                  translation -0.06100 -0.03291 -0.03181
+                  scale 0.001 0.001 0.001
+                  children [
+                    Shape {
+              castShadows FALSE
+                      appearance PBRAppearance { baseColor 0.22 0.22 0.25 roughness 0.3 metalness 0.7 }
+                      geometry Mesh {
+                        url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 wheel_1.step-1.STL"
+                      }
+                    }
+                  ]
+                }
+                # tire_1  ctr(57.0, 32.91, 31.81)
+                Transform {
+                  translation -0.05700 -0.03291 -0.03181
+                  scale 0.001 0.001 0.001
+                  children [
+                    Shape {
+              castShadows FALSE
+                      appearance PBRAppearance { baseColor 0.07 0.07 0.07 roughness 0.95 metalness 0 }
+                      geometry Mesh {
+                        url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 tire_1.step-1.STL"
+                      }
+                    }
+                  ]
+                }
+              ]
+              boundingObject Transform {
+                rotation 0 0 1 1.5708
+                children [ Cylinder { radius 0.031 height 0.020 } ]
+              }
+              physics Physics {
+                density -1
+                mass 0.04982
+                centerOfMass [ 0 0 0 ]
+                inertiaMatrix [ 4.104e-05 2.218e-05 2.218e-05 0 0 0 ]
+              }
+            }
+          }
+
+        ]
+        boundingObject Box { size 0.057 0.020 0.060 }
+        physics Physics { density -1 mass 0.12 centerOfMass [ 0 0 -0.03 ] }
+      }
+    }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FRONT-LEFT ARM + WHEEL
+    # Mirror of right: hinge at (-0.060, +0.035, -0.005)
+    # Solid has rotation 0 0 1 3.1416 to flip STLs to the correct side
+    # ═══════════════════════════════════════════════════════════════════════════
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        axis 0 1 0
+        anchor -0.060 0.030 -0.010
+      }
+      device [
+        RotationalMotor {
+          name "front_left_tilt_joint"
+          minPosition -0.05
+          maxPosition 1.5708
+          maxTorque 2.0
+          maxVelocity 0.7854
+        }
+        PositionSensor { name "front_left_tilt_sensor" }
+      ]
+      endPoint Solid {
+        translation -0.060 0.030 -0.010
+        rotation 0 0 1 3.1416
+        name "front_left_arm"
+        children [
+
+          # arm_1
+          Transform {
+            translation -0.05550 -0.03291 -0.05481
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.15 0.65 0.55 roughness 0.4 metalness 0.3 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 arm_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # arm_ball_stud
+          Transform {
+            translation -0.03300 -0.03941 -0.06381
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.7 0.7 0.72 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 arm_ball_stud_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # pivot_bracket
+          Transform {
+            translation -0.05950 -0.03291 -0.08431
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.25 0.25 0.28 roughness 0.4 metalness 0.6 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 pivot_bracket_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # pivot_pin
+          Transform {
+            translation -0.05700 -0.03266 -0.08181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.6 0.6 0.65 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 pivot_pin_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # axle
+          Transform {
+            translation -0.05700 -0.03291 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.65 0.65 0.7 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 axle_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # coupler
+          Transform {
+            translation -0.08550 -0.03291 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.55 0.55 0.6 roughness 0.3 metalness 0.7 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 coupler_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # motor
+          Transform {
+            translation -0.11750 -0.03291 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.3 0.3 0.35 roughness 0.3 metalness 0.8 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 motor_1.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # motor_enc
+          Transform {
+            translation -0.12250 -0.03041 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.2 0.2 0.25 roughness 0.4 metalness 0.6 }
+                geometry Mesh {
+                  url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 motor_enc.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # ── FRONT-LEFT WHEEL HINGE ───────────────────────────────────────
+          HingeJoint {
+            jointParameters HingeJointParameters {
+              axis -1 0 0
+              anchor 0 0 -0.058
+            }
+            device [
+              RotationalMotor {
+                name "front_left_wheel_joint"
+                maxTorque 0.8
+                maxVelocity 10.472
+              }
+              PositionSensor { name "front_left_wheel_sensor" }
+            ]
+            endPoint Solid {
+              translation 0 0 -0.058
+              name "front_left_wheel"
+              contactMaterial "wheel"
+              children [
+                Transform {
+                  translation -0.06100 -0.03291 -0.03181
+                  scale 0.001 0.001 0.001
+                  children [
+                    Shape {
+              castShadows FALSE
+                      appearance PBRAppearance { baseColor 0.22 0.22 0.25 roughness 0.3 metalness 0.7 }
+                      geometry Mesh {
+                        url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 wheel_1.step-1.STL"
+                      }
+                    }
+                  ]
+                }
+                Transform {
+                  translation -0.05700 -0.03291 -0.03181
+                  scale 0.001 0.001 0.001
+                  children [
+                    Shape {
+              castShadows FALSE
+                      appearance PBRAppearance { baseColor 0.07 0.07 0.07 roughness 0.95 metalness 0 }
+                      geometry Mesh {
+                        url "../protos/meshes/front_right_wheel_assembly - front_right_wheel_assembly.step-1 tire_1.step-1.STL"
+                      }
+                    }
+                  ]
+                }
+              ]
+              boundingObject Transform {
+                rotation 0 0 1 1.5708
+                children [ Cylinder { radius 0.031 height 0.020 } ]
+              }
+              physics Physics {
+                density -1
+                mass 0.04982
+                centerOfMass [ 0 0 0 ]
+                inertiaMatrix [ 4.104e-05 2.218e-05 2.218e-05 0 0 0 ]
+              }
+            }
+          }
+
+        ]
+        boundingObject Box { size 0.057 0.020 0.060 }
+        physics Physics { density -1 mass 0.12 centerOfMass [ 0 0 -0.03 ] }
+      }
+    }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # REAR POD + SWIVEL ASSEMBLY
+    # Swivel axis = Z (yaw), anchor at (0, -0.06928, -0.005)
+    # ═══════════════════════════════════════════════════════════════════════════
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        axis 0 0 1
+        anchor 0 -0.069 -0.010
+        springConstant 5.0
+        dampingConstant 2.0
+      }
+      device [
+        RotationalMotor {
+          name "rear_swivel_joint"
+          minPosition -1.5708
+          maxPosition 1.5708
+          maxTorque 5.0
+          maxVelocity 0.5
+        }
+        PositionSensor { name "rear_swivel_sensor" }
+      ]
+      endPoint Solid {
+        translation 0 -0.069 -0.010
+        name "rear_pod"
+        children [
+
+          # rear_module  ctr(25.25, 36.71, 55.06)
+          Transform {
+            translation -0.02525 -0.03671 -0.05506
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.15 0.65 0.55 roughness 0.4 metalness 0.3 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_module_2.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # rear_motor  ctr(85.75, 31.71, 31.81)
+          Transform {
+            translation -0.08575 -0.03171 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.3 0.3 0.35 roughness 0.3 metalness 0.8 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_motor_2.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # rear_motor_enclosure  ctr(90.75, 29.21, 31.81)
+          Transform {
+            translation -0.09075 -0.02921 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.2 0.2 0.25 roughness 0.4 metalness 0.6 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_motor_enclosure.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # rear_axle  ctr(25.25, 31.71, 31.81)
+          Transform {
+            translation -0.02525 -0.03171 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.65 0.65 0.7 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_axle_2.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # rear_kingpin  ctr(25.25, 31.71, 81.81)
+          Transform {
+            translation -0.02525 -0.03171 -0.08181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.5 0.5 0.55 roughness 0.3 metalness 0.8 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_kingpin_2.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # rear_coupler  ctr(53.75, 31.71, 31.81)
+          Transform {
+            translation -0.05375 -0.03171 -0.03181
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.55 0.55 0.6 roughness 0.3 metalness 0.7 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_coupler_2.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # rear_link  ctr(25.25, 63.71, 74.91)
+          Transform {
+            translation -0.02525 -0.06371 -0.07491
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 0.4 metalness 0.6 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_link_2.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # rear_ball_stud  ctr(25.25, 56.21, 73.81)  ← corrected from measured data
+          Transform {
+            translation -0.02525 -0.05621 -0.07381
+            scale 0.001 0.001 0.001
+            children [
+              Shape {
+              castShadows FALSE
+                appearance PBRAppearance { baseColor 0.7 0.7 0.72 roughness 0.2 metalness 0.9 }
+                geometry Mesh {
+                  url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_ball_stud_2.step-1.STL"
+                }
+              }
+            ]
+          }
+
+          # ── REAR PROP-TILT HINGE ─────────────────────────────────────────
+          # Axis = Z (vertical yaw axis).
+          # Land (0 rad):   wheel hangs straight down, rolls forward normally.
+          # Water (+1.5708): wheel yaws 90° → face now points along -Y (backward)
+          #   Spinning the wheel pushes water backward = forward propulsion. ✓
+          #   Like a boat outboard motor swinging from stowed to deployed position.
+          HingeJoint {
+            jointParameters HingeJointParameters {
+              axis 0 0 1
+              anchor 0 0 -0.040
+            }
+            device [
+              RotationalMotor {
+                name "rear_prop_tilt_joint"
+                minPosition 0.0
+                maxPosition 1.5708
+                maxTorque 2.0
+                maxVelocity 1.5708
+              }
+              PositionSensor { name "rear_prop_tilt_sensor" }
+            ]
+            endPoint Solid {
+              translation 0 0 -0.040
+              name "rear_prop_mount"
+              children [
+
+                # ── REAR WHEEL SPIN HINGE ──────────────────────────────────
+                # Land  (prop_tilt=0):        axis X → wheel rolls in Y direction ✓
+                # Water (prop_tilt=+90°/Z):   parent yawed 90° so X-axis now points
+                #   along -Y world → wheel face points backward → propels forward ✓
+                HingeJoint {
+                  jointParameters HingeJointParameters {
+                    axis 1 0 0
+                    anchor 0 0 -0.018
+                  }
+                  device [
+                    RotationalMotor {
+                      name "rear_wheel_joint"
+                      maxTorque 1.5
+                      maxVelocity 10.472
+                    }
+                    PositionSensor { name "rear_wheel_sensor" }
+                  ]
+                  endPoint Solid {
+                    translation 0 0 -0.020
+                    name "rear_prop_wheel"
+                    contactMaterial "wheel"
+                    children [
+                      Transform {
+                        translation -0.02925 -0.03171 -0.03181
+                        scale 0.001 0.001 0.001
+                        children [
+                          Shape {
+                            castShadows FALSE
+                            appearance PBRAppearance { baseColor 0.22 0.22 0.25 roughness 0.3 metalness 0.7 }
+                            geometry Mesh {
+                              url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_wheel_2.step-1.STL"
+                            }
+                          }
+                        ]
+                      }
+                      Transform {
+                        translation -0.02525 -0.03171 -0.03181
+                        scale 0.001 0.001 0.001
+                        children [
+                          Shape {
+                            castShadows FALSE
+                            appearance PBRAppearance { baseColor 0.07 0.07 0.07 roughness 0.95 metalness 0 }
+                            geometry Mesh {
+                              url "../protos/meshes/rear_complete_swivel_assembly - rear_complete_swivel_assembly.step-1 rear_tire_2.step-1.STL"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                    boundingObject Transform {
+                      rotation 0 1 0 1.5708
+                      children [ Cylinder { radius 0.031 height 0.020 } ]
+                    }
+                    physics Physics {
+                      density -1
+                      mass 0.04582
+                      centerOfMass [ 0 0 0 ]
+                      inertiaMatrix [ 2.040e-05 3.774e-05 2.040e-05 0 0 0 ]
+                    }
+                  }
+                }
+
+              ]
+              boundingObject Box { size 0.022 0.022 0.042 }
+              physics Physics { density -1 mass 0.010 centerOfMass [ 0 0 0 ] }
+            }
+          }
+
+        ]
+        boundingObject Box { size 0.090 0.065 0.080 }
+        physics Physics { density -1 mass 0.20 centerOfMass [ 0 0 -0.02 ] }
+      }
+    }
+
+  ]  # end Robot children
+
+  boundingObject Box { size 0.160 0.130 0.028 }
+  physics Physics {
+    density -1
+    mass 0.55
+    centerOfMass [ 0 -0.025 -0.045 ]
+    inertiaMatrix [ 2.20e-03 2.20e-03 3.80e-03 0 0 0 ]
+  }
+}
