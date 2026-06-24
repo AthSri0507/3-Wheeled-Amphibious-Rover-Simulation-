@@ -76,6 +76,8 @@ SWIVEL_STEP  =  0.04    # (land helpers; unused by water steering now)
 
 LAND, WATER = "LAND", "WATER"
 
+QUIET = False  # set True to silence transition prints (RL training)
+
 # GLFW key codes for the arrow keys (W/A/S/D are reserved by the MuJoCo viewer)
 KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP = 262, 263, 264, 265
 _ARROWS = (KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP)
@@ -176,15 +178,15 @@ class RoverController:
     # ----- amphibious transition --------------------------------------------
     def request_water(self):
         self.manual = "water"
-        print("[manual] forcing WATER deploy")
+        QUIET or print("[manual] forcing WATER deploy")
 
     def request_land(self):
         self.manual = "land"
-        print("[manual] forcing LAND retract")
+        QUIET or print("[manual] forcing LAND retract")
 
     def auto(self):
         self.manual = None
-        print("[manual] cleared -> automatic land/water transition")
+        QUIET or print("[manual] cleared -> automatic land/water transition")
 
     def chassis_submersion(self):
         """Fraction of the chassis below the water surface (0 on land, ->1 fully under)."""
@@ -219,9 +221,9 @@ class RoverController:
         new_mode = WATER if self.deploy > 0.5 else LAND
         if new_mode != self.mode:
             if new_mode == WATER:
-                print("[~> WATER]  afloat: arms spread, propeller deployed")
+                QUIET or print("[~> WATER]  afloat: arms spread, propeller deployed")
             else:
-                print("[~> LAND ]  beached: arms down, wheels rolling")
+                QUIET or print("[~> LAND ]  beached: arms down, wheels rolling")
                 self.swv = 0.0; self.steer = "none"; self._set("rear_swivel", 0.0)
         self.mode = new_mode
 
