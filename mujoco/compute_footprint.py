@@ -35,14 +35,16 @@ def main():
     print(f"{'component':28s}{'flash(KB)':>11s}{'latency(ms)':>13s}{'verdict':>16s}")
     print("-" * 68)
 
-    # --- classifier (frozen RF) ---
+    # --- terrain classifier (deployed) ---
     clf_path = os.path.join(HERE, "models", "terrain_clf.joblib")
     blob = joblib.load(clf_path)
-    nfeat = len(blob["feature_names"])
+    nfeat = len(blob.get("feat_idx") or blob["feature_names"])   # lite models use fewer features
+    kind = type(blob["pipe"].reg.steps[-1][1] if hasattr(blob["pipe"], "reg")
+                else blob["pipe"].steps[-1][1]).__name__
     lat = latency(lambda x: blob["pipe"].predict_proba(x), np.zeros((1, nfeat), np.float32))
     fkb = size_kb(clf_path)
     ok = fkb < BUDGET["flash_kb"] and lat < BUDGET["lat_ms"]
-    print(f"{'classifier (RandomForest)':28s}{fkb:11.0f}{lat:13.2f}"
+    print(f"{('classifier ('+kind+')'):28s}{fkb:11.1f}{lat:13.2f}"
           f"{('OK' if ok else 'OVER-BUDGET'):>16s}")
 
     # --- supervised controller ---
@@ -56,8 +58,8 @@ def main():
               f"{('OK' if ok else 'OVER-BUDGET'):>16s}")
 
     print("\nNotes:")
-    print(" - The full RandomForest is large (high Flash); for a true MCU target it must be shrunk")
-    print("   (shallow gradient boosting / small RF / quantization / threshold-FSM on top features).")
+    print(" - Classifier shrunk from a 25 MB / 66 ms RandomForest to a tiny MLP via shrink_classifier.py")
+    print("   (selected on mission + footprint); the 25 MB RF is kept as models/terrain_clf_full.joblib.")
     print(" - This is a DEPLOYMENT assessment only; it does not invalidate the task/research result.")
     print(" - FSM + PID are negligible (a few states / a few multiply-adds).")
 

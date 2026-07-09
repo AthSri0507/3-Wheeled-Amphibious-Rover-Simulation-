@@ -105,6 +105,12 @@ def window_features(win, fs=FS_DEFAULT):
 # stable feature order, derived once from a dummy window
 FEATURE_NAMES = list(window_features(np.zeros((8, len(RAW_COLS)))).keys())
 
+# "lite" feature set = drop the spectral (FFT) features. The FFT is the only expensive-on-MCU
+# feature-extraction step; the ablation shows vibration-variance + slip carry most of the signal,
+# so lite candidates avoid needing an FFT on the microcontroller.
+SPECTRAL_NAMES = [n for n in FEATURE_NAMES if n.startswith("az_domfreq") or n.startswith("az_band")]
+LITE_FEATURE_IDX = [i for i, n in enumerate(FEATURE_NAMES) if n not in SPECTRAL_NAMES]
+
 
 def features_vector(win, fs=FS_DEFAULT):
     d = window_features(win, fs)

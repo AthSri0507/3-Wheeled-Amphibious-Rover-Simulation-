@@ -31,13 +31,14 @@ CLASSIFY_EVERY = 25  # run the classifier at ~10 Hz (dt=0.004 -> every 25 steps)
 
 
 class ModeSelector:
-    def __init__(self, mode_source="classifier", dt=0.004):
+    def __init__(self, mode_source="classifier", dt=0.004, clf_path=None):
         self.mode_source = mode_source
         self.dt = dt
         if mode_source == "classifier":
-            blob = joblib.load(CLF_PATH)
+            blob = joblib.load(clf_path or CLF_PATH)
             self.pipe = blob["pipe"]; self.win_sec = blob["win_sec"]; self.fs = blob["fs"]
             self.classes = list(blob["classes"]); self.feat_names = blob["feature_names"]
+            self.feat_idx = blob.get("feat_idx")           # None = all 37 features; else a subset (lite)
             self.water_idx = self.classes.index("water")
             self.win_env = max(8, round(self.win_sec / dt))     # frames at sim rate
             self.win_train = max(8, round(self.win_sec * self.fs))
@@ -58,8 +59,10 @@ class ModeSelector:
         res = np.empty((self.win_train, win.shape[1]))
         for c in range(win.shape[1]):
             res[:, c] = np.interp(idx, np.arange(len(win)), win[:, c])
-        x = F.features_vector(res, fs=self.fs).reshape(1, -1)
-        return self.pipe.predict_proba(x)[0]               # in self.classes order
+        x = F.features_vector(res, fs=self.fs)
+        if self.feat_idx is not None:
+            x = x[self.feat_idx]                            # lite feature subset (no FFT)
+        return self.pipe.predict_proba(x.reshape(1, -1))[0]  # in self.classes order
 
     def update(self, world):
         """Run Layer 1 for this step: set the rover's mode goal. Returns terrain probs (4-vec)."""

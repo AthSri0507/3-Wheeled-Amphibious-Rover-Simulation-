@@ -63,8 +63,8 @@ def tuned_layer2(obs):
 
 # ---------- assembled controllers (Layer 1 + Layer 2) ----------
 class AmphibController:
-    def __init__(self, mode_source, layer2, dt=0.004, name=""):
-        self.ms = ModeSelector(mode_source, dt=dt)
+    def __init__(self, mode_source, layer2, dt=0.004, name="", clf_path=None):
+        self.ms = ModeSelector(mode_source, dt=dt, clf_path=clf_path)
         self.layer2 = layer2
         self.name = name
 
@@ -120,13 +120,13 @@ def collect_demos(seeds, current_fn=lambda s: (s % 3) * 0.05):
     return np.array(X, np.float32), np.array(Y, np.float32)
 
 
-def make_controller(name, dt=0.004):
+def make_controller(name, dt=0.004, clf_path=None):
     if name == "oracle_upperbound":
         return AmphibController("oracle", tuned_layer2, dt, name)
     if name == "oracle_teacher":
-        return AmphibController("classifier", tuned_layer2, dt, name)
+        return AmphibController("classifier", tuned_layer2, dt, name, clf_path=clf_path)
     if name == "classifier_fsm_rule":
-        return AmphibController("classifier", rule_layer2, dt, name)
+        return AmphibController("classifier", rule_layer2, dt, name, clf_path=clf_path)
     if name == "nonadaptive":
         return AmphibController("forced_land", rule_layer2, dt, name)
     raise ValueError(name)

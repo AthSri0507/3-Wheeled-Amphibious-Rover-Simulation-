@@ -1,0 +1,2456 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+
+
+================================================================
+Directory Structure
+================================================================
+differential.cpp
+differential.h
+encoder.cpp
+encoder.h
+esp_server.ino
+hal_gpio.cpp
+hal_gpio.h
+hal_interrupt.cpp
+hal_interrupt.h
+hal_pwm.cpp
+hal_pwm.h
+l289.cpp
+l289.h
+odometry.cpp
+odometry.h
+
+================================================================
+Files
+================================================================
+
+================
+File: differential.cpp
+================
+#include "differential.h"
+#include <math.h>
+
+/*
+    =====================================
+    ROBOT GEOMETRY / DRIVE CONFIG
+    Measure these on YOUR robot.
+    =====================================
+*/
+
+static const float WHEEL_BASE_M   = 0.12f;     // track width (m)
+static const float WHEEL_RADIUS_M = 0.025f;   // wheel radius (m)
+
+// Per-wheel max RPM at full PWM, SEPARATELY for each direction.
+// Measure all four — motors are rarely symmetric fwd vs rev.
+static const float MAX_RPM_LEFT_FWD  = 140.0f;
+static const float MAX_RPM_LEFT_REV  = 140.0f;
+static const float MAX_RPM_RIGHT_FWD = 100.0f;
+static const float MAX_RPM_RIGHT_REV = 100.0f;
+
+// Turn rate commanded at steering = +/-1.0 (rad/s). Tuning knob.
+static const float STEER_MAX_RAD_S = 1.5f;
+
+// --- derived: max linear wheel speed (m/s) per side per direction ---
+#define RPM_TO_MPS(rpm) (((rpm) / 60.0f) * 2.0f * (float)M_PI * WHEEL_RADIUS_M)
+
+static const float MAX_L_FWD = RPM_TO_MPS(MAX_RPM_LEFT_FWD);
+static const float MAX_L_REV = RPM_TO_MPS(MAX_RPM_LEFT_REV);
+static const float MAX_R_FWD = RPM_TO_MPS(MAX_RPM_RIGHT_FWD);
+static const float MAX_R_REV = RPM_TO_MPS(MAX_RPM_RIGHT_REV);
+
+static float clamp(float value, float min_value, float max_value)
+{
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+// Pick the right max for a wheel given its commanded velocity sign.
+static float wheel_max(float v, float max_fwd, float max_rev)
+{
+    return (v >= 0.0f) ? max_fwd : max_rev;
+}
+
+/*
+    Core kinematics + direction-aware per-wheel normalization.
+
+      v_ref limited by the slower wheel IN THE TRAVEL DIRECTION,
+      so throttle = +/-1.0 is achievable without saturating either side.
+
+      v     = throttle * v_ref
+      omega = steering * STEER_MAX_RAD_S
+      v_left  = v - omega*(L/2)
+      v_right = v + omega*(L/2)
+      left  = v_left  / (that wheel's max for its direction)
+      right = v_right / (that wheel's max for its direction)
+*/
+static void mix(float throttle, float steering,
+                float* left, float* right, float* scale_out)
+{
+    // Reference uses the slower side for the intended travel direction.
+    float v_ref = (throttle >= 0.0f)
+                  ? fminf(MAX_L_FWD, MAX_R_FWD)
+                  : fminf(MAX_L_REV, MAX_R_REV);
+
+    float v     = throttle * v_ref;
+    float omega = steering * STEER_MAX_RAD_S;
+
+    float v_left  = v - omega * (WHEEL_BASE_M * 0.5f);
+    float v_right = v + omega * (WHEEL_BASE_M * 0.5f);
+
+    // Each wheel normalized by its own max FOR ITS OWN direction.
+    float l = v_left  / wheel_max(v_left,  MAX_L_FWD, MAX_L_REV);
+    float r = v_right / wheel_max(v_right, MAX_R_FWD, MAX_R_REV);
+
+    float max_mag = max(fabsf(l), fabsf(r));
+    float scale = (max_mag > 1.0f) ? (1.0f / max_mag) : 1.0f;
+
+    *left      = l * scale;
+    *right     = r * scale;
+    *scale_out = scale;
+}
+
+void differential_mixer_update(float throttle, float steering, diff_output_t* output)
+{
+    float l, r, scale;
+    mix(throttle, steering, &l, &r, &scale);
+
+    output->left  = clamp(l, -1.0f, 1.0f);
+    output->right = clamp(r, -1.0f, 1.0f);
+}
+
+uint32_t differential_turn_duration_ms(float angle_rad, float steering)
+{
+    float l, r, scale;
+    mix(0.0f, steering, &l, &r, &scale);   // pure turn
+
+    float omega = fabsf(steering) * STEER_MAX_RAD_S * scale;
+    if (omega < 1e-3f) return 0;
+
+    return (uint32_t)((fabsf(angle_rad) / omega) * 1000.0f);
+}
+
+================
+File: differential.h
+================
+#pragma once
+
+#ifndef DIFFERENTIAL_H
+#define DIFFERENTIAL_H
+
+
+#include <Arduino.h>
+
+//Differential mixer output
+typedef struct
+{
+    float left;
+    float right;
+} diff_output_t;
+
+/*
+    Inputs:
+        throttle -> forward/reverse motion
+        steering -> turning amount
+    Range:
+        throttle : -1.0 to +1.0
+        steering : -1.0 to +1.0
+    Outputs:
+        left/right normalized wheel commands
+*/
+
+
+void differential_mixer_update(
+    float throttle,
+    float steering,
+    diff_output_t* output
+);
+
+// Time (ms) to rotate angle_rad at the given steering fraction (open-loop)
+uint32_t differential_turn_duration_ms(float angle_rad, float steering);
+#endif
+
+================
+File: encoder.cpp
+================
+#include "encoder.h"
+
+#include "hal_gpio.h"
+#include "hal_interrupt.h"
+
+
+static encoder_t* encoder0 = nullptr;
+static encoder_t* encoder1 = nullptr;
+
+/*
+    Quadrature decoder
+*/
+
+static void encoder_update(
+    encoder_t* encoder
+)
+{
+    int msb =
+        hal_gpio_read(encoder->pin_a);
+
+    int lsb =
+        hal_gpio_read(encoder->pin_b);
+
+    int encoded =
+        (msb << 1) | lsb;
+
+    int sum =
+        (encoder->last_encoded << 2)
+        | encoded;
+
+    /*
+        Direction detection
+    */
+
+    if(
+        sum == 0b1101 ||
+        sum == 0b0100 ||
+        sum == 0b0010 ||
+        sum == 0b1011
+    )
+    {
+        encoder->ticks--;
+    }
+
+    if(
+        sum == 0b1110 ||
+        sum == 0b0111 ||
+        sum == 0b0001 ||
+        sum == 0b1000
+    )
+    {
+        encoder->ticks++;
+    }
+
+    encoder->last_encoded =
+        encoded;
+}
+
+/*
+    ISR wrappers
+*/
+
+static void encoder0_isr()
+{
+    if(encoder0 != nullptr)
+    {
+        encoder_update(encoder0);
+    }
+}
+
+static void encoder1_isr()
+{
+    if(encoder1 != nullptr)
+    {
+        encoder_update(encoder1);
+    }
+}
+
+/*
+    Initialize encoder
+*/
+
+void encoder_init(
+    encoder_t* encoder
+)
+{
+    hal_gpio_init(
+        encoder->pin_a,
+        HAL_GPIO_INPUT_PULLUP
+    );
+
+    hal_gpio_init(
+        encoder->pin_b,
+        HAL_GPIO_INPUT_PULLUP
+    );
+
+    encoder->ticks = 0;
+    encoder->last_encoded = 0;
+
+    /*
+        Register encoder instances
+    */
+
+    if(encoder0 == nullptr)
+    {
+        encoder0 = encoder;
+
+        hal_interrupt_attach(
+            encoder->pin_a,
+            encoder0_isr,
+            CHANGE
+        );
+
+        hal_interrupt_attach(
+            encoder->pin_b,
+            encoder0_isr,
+            CHANGE
+        );
+    }
+    else if(encoder1 == nullptr)
+    {
+        encoder1 = encoder;
+
+        hal_interrupt_attach(
+            encoder->pin_a,
+            encoder1_isr,
+            CHANGE
+        );
+
+        hal_interrupt_attach(
+            encoder->pin_b,
+            encoder1_isr,
+            CHANGE
+        );
+    }
+}
+
+/*
+    Get tick count
+*/
+
+long encoder_get_ticks(
+    encoder_t* encoder
+)
+{
+    noInterrupts();
+
+    long ticks =
+        encoder->ticks;
+
+    interrupts();
+
+    return ticks;
+}
+
+/*
+    Reset encoder
+*/
+
+void encoder_reset(
+    encoder_t* encoder
+)
+{
+    noInterrupts();
+
+    encoder->ticks = 0;
+
+    interrupts();
+}
+
+================
+File: encoder.h
+================
+#pragma once
+
+#include <Arduino.h>
+
+/*
+    Encoder object
+*/
+
+typedef struct
+{
+    uint8_t pin_a;
+    uint8_t pin_b;
+
+    volatile long ticks;
+
+    volatile int last_encoded;
+
+} encoder_t;
+
+/*
+    Initialize encoder
+*/
+
+void encoder_init(
+    encoder_t* encoder
+);
+
+/*
+    Get encoder ticks
+*/
+
+long encoder_get_ticks(
+    encoder_t* encoder
+);
+
+/*
+    Reset encoder ticks
+*/
+
+void encoder_reset(
+    encoder_t* encoder
+);
+
+================
+File: esp_server.ino
+================
+/*
+    DIFFERENTIAL DRIVE + ODOMETRY TEST
+    (with runtime serial configuration)
+
+    Purpose:
+    - Verify motor driver operation (left and/or right)
+    - Verify encoder counting (left and/or right)
+    - Verify odometry calculations
+    - Measure RPM, velocity, distance, and pose
+
+    Configurable hardware:
+        Flip the HAS_* flags below to match what's actually wired.
+        e.g. only a right motor + right encoder -> set HAS_LEFT_MOTOR
+        and HAS_LEFT_ENCODER to 0. odometry.cpp already handles a
+        nullptr encoder (falls back to single-wheel odometry), so
+        disabling one side just works.
+
+    Runtime configuration - TWO WAYS IN, same underlying settings:
+
+    (A) Wi-Fi control panel (NEW, no cable needed):
+        Fill in WIFI_SSID / WIFI_PASSWORD below, flash the board, then
+        open the Serial Monitor ONCE just to read the IP address it
+        prints on boot (or just visit http://diffdrive.local/ if your
+        network/OS supports mDNS - most do). After that you can
+        unplug the cable entirely and control everything from your
+        phone or laptop browser: base speed, left/right scale, and
+        left/right reverse, plus live telemetry (RPM, velocity,
+        heading, pose).
+
+    (B) Serial Monitor (still works, e.g. for scripting/logging):
+        Open the Serial Monitor at 115200 baud, line ending "Newline".
+        Type a command and hit enter. See HELP for the full list.
+        The most useful one: set the left motor to run at 0.7x the
+        right motor's speed with:
+
+            LSCALE 0.7
+
+        Speed multipliers are applied on top of the base speed, so
+        the right side always runs at base_speed * right_scale and
+        the left side at base_speed * left_scale.
+
+        If a motor spins backwards because IN1/IN2 got wired the
+        "wrong" way round, you don't need to touch the wiring or the
+        pin config - just reverse it in software:
+
+            LREV 1     (reverse the left motor)
+            RREV 1     (reverse the right motor)
+
+        Send LREV 0 / RREV 0 to put it back to normal.
+
+    Both control paths (web + serial) act on the exact same globals,
+    so they stay in sync no matter which one you use.
+
+    Test Sequence:
+    1. Drive enabled motor(s) forward continuously (unless stopped
+       from the web panel or the serial monitor)
+    2. Continuously print odometry data to Serial AND serve it as
+       JSON at /api/status for the web panel
+    3. Serial commands and HTTP requests are both checked every loop
+       iteration
+*/
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include "encoder.h"
+#include "odometry.h"
+#include "l289.h"
+
+/*
+    =========================
+    WI-FI / WEB SERVER CONFIGURATION
+    Fill in your network credentials. The ESP32 joins your existing
+    Wi-Fi (station mode) so your phone/laptop can reach it - it does
+    NOT create its own hotspot.
+    =========================
+*/
+
+#define WIFI_SSID       "AMDEAAAR_2.4G"
+#define WIFI_PASSWORD   "amdeaaar77"
+#define MDNS_HOSTNAME   "diffdrive"   // reachable at http://diffdrive.local/
+
+WebServer web_server(80);
+
+/*
+    =========================
+    HARDWARE CONFIGURATION
+    Set to 1 if present/wired, 0 if not.
+    =========================
+*/
+
+#define HAS_LEFT_MOTOR     1
+#define HAS_RIGHT_MOTOR    1
+
+#define HAS_LEFT_ENCODER   1
+#define HAS_RIGHT_ENCODER  1
+
+/*
+    =========================
+    MOTOR CONFIGURATION
+    Edit pins to match your wiring. Pins for a disabled motor are
+    ignored, no need to remove them.
+    =========================
+*/
+
+#if HAS_LEFT_MOTOR
+l298_motor_t left_motor =
+{
+    .in1 = 32,
+    .in2 = 26,
+    .en  = 13
+};
+#endif
+
+#if HAS_RIGHT_MOTOR
+l298_motor_t right_motor =
+{
+    .in1 = 25,
+    .in2 = 14,
+    .en  = 33
+};
+#endif
+
+/*
+    =========================
+    ENCODER CONFIGURATION
+    =========================
+*/
+
+#if HAS_LEFT_ENCODER
+encoder_t left_encoder =
+{
+    .pin_a = 22,
+    .pin_b = 23
+};
+#endif
+
+#if HAS_RIGHT_ENCODER
+encoder_t right_encoder =
+{
+    .pin_a = 18,
+    .pin_b = 21
+};
+#endif
+
+/*
+    =========================
+    ODOMETRY CONFIGURATION
+    Measure/derive these for YOUR robot + encoder.
+    =========================
+*/
+
+odometry_t odom =
+{
+    #if HAS_LEFT_ENCODER
+    .left_encoder = &left_encoder,
+    #else
+    .left_encoder = nullptr,
+    #endif
+
+    #if HAS_RIGHT_ENCODER
+    .right_encoder = &right_encoder,
+    #else
+    .right_encoder = nullptr,
+    #endif
+
+    .ticks_per_motor_rev = 28.0f,
+    .gear_ratio          = 200.0f,
+    .wheel_radius        = 0.031f,
+    .wheel_base          = 0.18f
+};
+
+/*
+    =========================
+    RUNTIME-CONFIGURABLE TEST PARAMETERS
+    These used to be #define/const. They're now plain globals so the
+    serial command parser can change them on the fly.
+    =========================
+*/
+
+
+uint8_t base_speed   = 150;   // 0-255, applied to both sides before scaling
+float   left_scale   = 1.0f;  // left_speed  = base_speed * left_scale
+float   right_scale  = 1.0f;  // right_speed = base_speed * right_scale
+
+// If a motor spins the "wrong" way because IN1/IN2 ended up swapped
+// on the wiring, flip its invert flag instead of re-wiring anything.
+// This has the same effect as swapping IN1 and IN2 for that motor.
+bool left_invert  = false;
+bool right_invert = false;
+
+static const uint32_t TEST_DURATION_MS = 10000; // unused while the auto-stop block is commented out
+
+/*
+    =========================
+    GLOBAL VARIABLES
+    =========================
+*/
+
+uint32_t start_time = 0;
+unsigned long last_update_time = 0;
+bool motor_running = false;
+
+String serial_line = "";  // accumulates characters until a newline
+
+/*
+    =========================
+    APPLY MOTOR OUTPUT
+    Only drives a motor if its HAS_* flag is set.
+    Each side's speed = base_speed * that side's scale, clamped to
+    a valid PWM range (0-255).
+    =========================
+*/
+
+uint8_t scaled_speed(uint8_t base, float scale)
+{
+    float result = (float)base * scale;
+
+    if (result < 0.0f)   result = 0.0f;
+    if (result > 255.0f) result = 255.0f;
+
+    return (uint8_t)result;
+}
+
+// Flips FORWARD<->BACKWARD when invert is true. Anything else
+// (e.g. a STOP/BRAKE direction, if your l298_direction_t has one)
+// is passed through unchanged.
+l298_direction_t effective_direction(l298_direction_t direction, bool invert)
+{
+    if (!invert)
+    {
+        return direction;
+    }
+
+    if (direction == L298_FORWARD)
+    {
+        return L298_REVERSE;
+    }
+
+    if (direction == L298_REVERSE)
+    {
+        return L298_FORWARD;
+    }
+
+    return direction;
+}
+
+void drive_motors(l298_direction_t direction, uint8_t speed)
+{
+    uint8_t left_speed  = scaled_speed(speed, left_scale);
+    uint8_t right_speed = scaled_speed(speed, right_scale);
+
+    l298_direction_t left_direction  = effective_direction(direction, left_invert);
+    l298_direction_t right_direction = effective_direction(direction, right_invert);
+
+#if HAS_LEFT_MOTOR
+    l298_drive(&left_motor, left_direction, left_speed);
+#endif
+
+#if HAS_RIGHT_MOTOR
+    l298_drive(&right_motor, right_direction, right_speed);
+#endif
+}
+
+void stop_motors()
+{
+#if HAS_LEFT_MOTOR
+    l298_stop(&left_motor);
+#endif
+
+#if HAS_RIGHT_MOTOR
+    l298_stop(&right_motor);
+#endif
+}
+
+/*
+    =========================
+    SERIAL COMMAND PARSER
+
+    Commands (case-insensitive, whitespace-separated):
+        SPEED <0-255>     set base_speed
+        LSCALE <float>    set left_scale  (e.g. 0.7)
+        RSCALE <float>    set right_scale (e.g. 1.0)
+        LREV <0|1>        reverse left motor direction  (1 = reversed)
+        RREV <0|1>        reverse right motor direction (1 = reversed)
+        START             start driving
+        STOP              stop motors
+        STATUS            print current config
+        HELP              print this list
+    =========================
+*/
+
+void print_status()
+{
+    Serial.println("---- CURRENT CONFIG ----");
+    Serial.print("base_speed:  "); Serial.println(base_speed);
+    Serial.print("left_scale:  "); Serial.println(left_scale, 3);
+    Serial.print("right_scale: "); Serial.println(right_scale, 3);
+    Serial.print("left_invert:  "); Serial.println(left_invert  ? "YES (reversed)" : "no");
+    Serial.print("right_invert: "); Serial.println(right_invert ? "YES (reversed)" : "no");
+    Serial.print("left speed (applied):  "); Serial.println(scaled_speed(base_speed, left_scale));
+    Serial.print("right speed (applied): "); Serial.println(scaled_speed(base_speed, right_scale));
+    Serial.print("motor_running: "); Serial.println(motor_running ? "YES" : "NO");
+    Serial.println("------------------------");
+}
+
+void print_help()
+{
+    Serial.println("---- SERIAL COMMANDS ----");
+    Serial.println("SPEED <0-255>   set base speed for both motors");
+    Serial.println("LSCALE <float>  set left motor speed multiplier (e.g. LSCALE 0.7)");
+    Serial.println("RSCALE <float>  set right motor speed multiplier (e.g. RSCALE 1.0)");
+    Serial.println("LREV <0|1>      reverse left motor direction (swaps IN1/IN2 effect)");
+    Serial.println("RREV <0|1>      reverse right motor direction (swaps IN1/IN2 effect)");
+    Serial.println("START           start driving forward");
+    Serial.println("STOP            stop both motors");
+    Serial.println("STATUS          print current configuration");
+    Serial.println("HELP            print this message");
+    Serial.println("-------------------------");
+}
+
+// Builds the same telemetry/config snapshot the web panel polls,
+// as a JSON string. Shared by /api/status and /api/set so both
+// endpoints always hand back fresh data after any change.
+String build_status_json()
+{
+    String json = "{";
+
+    json += "\"base_speed\":" + String(base_speed) + ",";
+    json += "\"left_scale\":" + String(left_scale, 3) + ",";
+    json += "\"right_scale\":" + String(right_scale, 3) + ",";
+    json += "\"left_invert\":" + String(left_invert  ? 1 : 0) + ",";
+    json += "\"right_invert\":" + String(right_invert ? 1 : 0) + ",";
+    json += "\"running\":" + String(motor_running ? 1 : 0) + ",";
+    json += "\"left_applied_speed\":" + String(scaled_speed(base_speed, left_scale)) + ",";
+    json += "\"right_applied_speed\":" + String(scaled_speed(base_speed, right_scale)) + ",";
+
+#if HAS_LEFT_ENCODER
+    json += "\"left_ticks\":" + String(encoder_get_ticks(&left_encoder)) + ",";
+#else
+    json += "\"left_ticks\":0,";
+#endif
+
+#if HAS_RIGHT_ENCODER
+    json += "\"right_ticks\":" + String(encoder_get_ticks(&right_encoder)) + ",";
+#else
+    json += "\"right_ticks\":0,";
+#endif
+
+    json += "\"left_motor_rpm\":"   + String(odom.data.left_motor_rpm, 2) + ",";
+    json += "\"right_motor_rpm\":"  + String(odom.data.right_motor_rpm, 2) + ",";
+    json += "\"left_wheel_rpm\":"   + String(odom.data.left_wheel_rpm, 2) + ",";
+    json += "\"right_wheel_rpm\":"  + String(odom.data.right_wheel_rpm, 2) + ",";
+    json += "\"left_velocity\":"    + String(odom.data.left_velocity, 3) + ",";
+    json += "\"right_velocity\":"   + String(odom.data.right_velocity, 3) + ",";
+    json += "\"linear_velocity\":"  + String(odom.data.linear_velocity, 3) + ",";
+    json += "\"angular_velocity\":" + String(odom.data.angular_velocity, 3) + ",";
+    json += "\"heading_deg\":"      + String(degrees(odom.data.heading), 2) + ",";
+    json += "\"x\":"                + String(odom.data.x, 3) + ",";
+    json += "\"y\":"                + String(odom.data.y, 3) + ",";
+    json += "\"distance\":"         + String(odom.data.distance, 3);
+
+    json += "}";
+
+    return json;
+}
+
+/*
+    =========================
+    WEB CONTROL PANEL (frontend)
+    A single self-contained HTML page (CSS + JS inline) served
+    straight from flash - no SPIFFS, no external files, no internet
+    connection required to load it. It polls /api/status and posts
+    changes to /api/set.
+    =========================
+*/
+
+const char HTML_PAGE[] PROGMEM = R"HTMLPAGE(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>diff-drive // control</title>
+<style>
+  :root{
+    --bg:#0b0f14;
+    --panel:#121821;
+    --panel-border:#1f2b38;
+    --text:#d7e1ea;
+    --muted:#6b7785;
+    --amber:#e8a33d;
+    --cyan:#4fd1c5;
+    --danger:#e2585d;
+    --good:#59d18c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    padding:20px;
+    background:var(--bg);
+    color:var(--text);
+    font-family:ui-monospace,"SFMono-Regular","JetBrains Mono",Menlo,Consolas,monospace;
+    font-size:14px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:720px;margin:0 auto;}
+  .nameplate{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    border-bottom:1px solid var(--panel-border);
+    padding-bottom:14px;
+    margin-bottom:18px;
+  }
+  .nameplate h1{
+    font-size:16px;
+    letter-spacing:0.12em;
+    margin:0;
+    font-weight:700;
+    text-transform:uppercase;
+  }
+  .nameplate h1 span{color:var(--muted);font-weight:400;}
+  .conn{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted);letter-spacing:0.05em;}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--danger);transition:background .2s;}
+  .dot.ok{background:var(--good);}
+
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--panel-border);
+    border-radius:6px;
+    padding:16px 18px;
+    margin-bottom:14px;
+  }
+  .panel h2{
+    font-size:11px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin:0 0 14px 0;
+    font-weight:600;
+  }
+
+  .row{display:flex;align-items:center;gap:12px;margin-bottom:10px;}
+  .row:last-child{margin-bottom:0;}
+  .row label{width:96px;flex-shrink:0;color:var(--muted);font-size:12px;}
+  .row input[type=range]{flex:1;accent-color:var(--amber);}
+  .row .val{width:52px;text-align:right;font-variant-numeric:tabular-nums;}
+
+  .buttons{display:flex;gap:10px;margin-top:14px;}
+  button{
+    flex:1;
+    background:transparent;
+    border:1px solid var(--panel-border);
+    color:var(--text);
+    padding:10px;
+    border-radius:5px;
+    font-family:inherit;
+    font-size:12px;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+    cursor:pointer;
+    transition:border-color .15s,color .15s;
+  }
+  button:hover{border-color:var(--text);}
+  #btnStart{color:var(--good);}
+  #btnStart:hover{border-color:var(--good);}
+  #btnStop{color:var(--danger);}
+  #btnStop:hover{border-color:var(--danger);}
+
+  .channels{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .channel h2.L{color:var(--amber);}
+  .channel h2.R{color:var(--cyan);}
+  .field{margin-bottom:12px;}
+  .field label{display:block;color:var(--muted);font-size:11px;margin-bottom:5px;letter-spacing:0.05em;}
+  .field input[type=number]{
+    width:100%;
+    background:var(--bg);
+    border:1px solid var(--panel-border);
+    color:var(--text);
+    padding:7px 8px;
+    border-radius:4px;
+    font-family:inherit;
+    font-size:13px;
+  }
+  .switch-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+  .switch-row label{color:var(--muted);font-size:11px;letter-spacing:0.05em;}
+  .switch{position:relative;width:38px;height:20px;flex-shrink:0;}
+  .switch input{opacity:0;width:0;height:0;}
+  .slider-toggle{
+    position:absolute;inset:0;
+    background:var(--bg);
+    border:1px solid var(--panel-border);
+    border-radius:20px;
+    cursor:pointer;
+    transition:.15s;
+  }
+  .slider-toggle:before{
+    content:"";
+    position:absolute;
+    height:12px;width:12px;
+    left:3px;top:3px;
+    background:var(--muted);
+    border-radius:50%;
+    transition:.15s;
+  }
+  .channel.left input:checked + .slider-toggle{border-color:var(--amber);}
+  .channel.left input:checked + .slider-toggle:before{background:var(--amber);transform:translateX(18px);}
+  .channel.right input:checked + .slider-toggle{border-color:var(--cyan);}
+  .channel.right input:checked + .slider-toggle:before{background:var(--cyan);transform:translateX(18px);}
+
+  .bar{height:5px;background:var(--bg);border-radius:3px;overflow:hidden;margin-bottom:12px;}
+  .bar-fill{height:100%;width:0%;transition:width .2s;}
+  .channel.left .bar-fill{background:var(--amber);}
+  .channel.right .bar-fill{background:var(--cyan);}
+
+  .telemetry{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);}
+  .telemetry b{color:var(--text);font-weight:400;font-variant-numeric:tabular-nums;}
+
+  .pose{display:flex;gap:20px;align-items:center;}
+  .pose-readouts{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;}
+  .pose-readouts div{font-size:11px;color:var(--muted);}
+  .pose-readouts b{display:block;color:var(--text);font-size:15px;font-weight:400;font-variant-numeric:tabular-nums;}
+  .compass-label{fill:var(--muted);font-size:9px;font-family:inherit;}
+
+  footer{text-align:center;color:var(--panel-border);font-size:10px;margin-top:10px;letter-spacing:0.05em;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="nameplate">
+    <h1>Diff-Drive <span>// control</span></h1>
+    <div class="conn"><div class="dot" id="dot"></div><span id="connText">connecting</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Drive</h2>
+    <div class="row">
+      <label>base speed</label>
+      <input type="range" id="speed" min="0" max="255" step="1">
+      <div class="val" id="speedVal">--</div>
+    </div>
+    <div class="buttons">
+      <button id="btnStart">Start</button>
+      <button id="btnStop">Stop</button>
+    </div>
+  </div>
+
+  <div class="channels">
+
+    <div class="panel channel left">
+      <h2 class="L">Left</h2>
+      <div class="field">
+        <label>scale (× base speed)</label>
+        <input type="number" id="lscale" min="0" max="2" step="0.05">
+      </div>
+      <div class="switch-row">
+        <label>reverse direction</label>
+        <label class="switch">
+          <input type="checkbox" id="lrev">
+          <span class="slider-toggle"></span>
+        </label>
+      </div>
+      <div class="bar"><div class="bar-fill" id="lbar"></div></div>
+      <div class="telemetry"><span>output</span><b id="lout">--</b></div>
+      <div class="telemetry"><span>wheel rpm</span><b id="lrpm">--</b></div>
+      <div class="telemetry"><span>velocity m/s</span><b id="lvel">--</b></div>
+      <div class="telemetry"><span>ticks</span><b id="ltix">--</b></div>
+    </div>
+
+    <div class="panel channel right">
+      <h2 class="R">Right</h2>
+      <div class="field">
+        <label>scale (× base speed)</label>
+        <input type="number" id="rscale" min="0" max="2" step="0.05">
+      </div>
+      <div class="switch-row">
+        <label>reverse direction</label>
+        <label class="switch">
+          <input type="checkbox" id="rrev">
+          <span class="slider-toggle"></span>
+        </label>
+      </div>
+      <div class="bar"><div class="bar-fill" id="rbar"></div></div>
+      <div class="telemetry"><span>output</span><b id="rout">--</b></div>
+      <div class="telemetry"><span>wheel rpm</span><b id="rrpm">--</b></div>
+      <div class="telemetry"><span>velocity m/s</span><b id="rvel">--</b></div>
+      <div class="telemetry"><span>ticks</span><b id="rtix">--</b></div>
+    </div>
+
+  </div>
+
+  <div class="panel">
+    <h2>Pose</h2>
+    <div class="pose">
+      <svg viewBox="0 0 120 120" width="110" height="110">
+        <circle cx="60" cy="60" r="54" fill="none" stroke="var(--panel-border)" stroke-width="2"/>
+        <text x="60" y="13" text-anchor="middle" class="compass-label">0</text>
+        <text x="112" y="64" text-anchor="middle" class="compass-label">90</text>
+        <text x="60" y="112" text-anchor="middle" class="compass-label">180</text>
+        <text x="8"  y="64" text-anchor="middle" class="compass-label">270</text>
+        <g id="needle" style="transform-origin:60px 60px;">
+          <line x1="60" y1="60" x2="60" y2="18" stroke="var(--amber)" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="60" cy="60" r="4" fill="var(--amber)"/>
+        </g>
+      </svg>
+      <div class="pose-readouts">
+        <div>heading<b id="heading">--</b></div>
+        <div>distance<b id="dist">--</b></div>
+        <div>x<b id="px">--</b></div>
+        <div>y<b id="py">--</b></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>polling /api/status every 400ms</footer>
+</div>
+
+<script>
+  const dot = document.getElementById('dot');
+  const connText = document.getElementById('connText');
+
+  const speed = document.getElementById('speed');
+  const speedVal = document.getElementById('speedVal');
+  const lscale = document.getElementById('lscale');
+  const rscale = document.getElementById('rscale');
+  const lrev = document.getElementById('lrev');
+  const rrev = document.getElementById('rrev');
+
+  function setConn(ok){
+    dot.classList.toggle('ok', ok);
+    connText.textContent = ok ? 'connected' : 'disconnected';
+  }
+
+  function syncIfIdle(el, value){
+    if (document.activeElement !== el){
+      el.value = value;
+    }
+  }
+
+  function updateUI(d){
+    syncIfIdle(speed, d.base_speed);
+    speedVal.textContent = d.base_speed;
+
+    syncIfIdle(lscale, d.left_scale);
+    syncIfIdle(rscale, d.right_scale);
+
+    if (document.activeElement !== lrev) lrev.checked = !!d.left_invert;
+    if (document.activeElement !== rrev) rrev.checked = !!d.right_invert;
+
+    document.getElementById('lbar').style.width = (d.left_applied_speed/255*100) + '%';
+    document.getElementById('rbar').style.width = (d.right_applied_speed/255*100) + '%';
+    document.getElementById('lout').textContent = d.left_applied_speed + ' / 255';
+    document.getElementById('rout').textContent = d.right_applied_speed + ' / 255';
+    document.getElementById('lrpm').textContent = d.left_wheel_rpm;
+    document.getElementById('rrpm').textContent = d.right_wheel_rpm;
+    document.getElementById('lvel').textContent = d.left_velocity;
+    document.getElementById('rvel').textContent = d.right_velocity;
+    document.getElementById('ltix').textContent = d.left_ticks;
+    document.getElementById('rtix').textContent = d.right_ticks;
+
+    document.getElementById('heading').textContent = d.heading_deg + '°';
+    document.getElementById('dist').textContent = d.distance + ' m';
+    document.getElementById('px').textContent = d.x + ' m';
+    document.getElementById('py').textContent = d.y + ' m';
+    document.getElementById('needle').style.transform = 'rotate(' + d.heading_deg + 'deg)';
+
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
+    btnStart.style.opacity = d.running ? '0.4' : '1';
+    btnStop.style.opacity = d.running ? '1' : '0.4';
+  }
+
+  function sendSet(params){
+    const qs = new URLSearchParams(params).toString();
+    fetch('/api/set?' + qs)
+      .then(r => r.json())
+      .then(d => { updateUI(d); setConn(true); })
+      .catch(() => setConn(false));
+  }
+
+  function poll(){
+    fetch('/api/status')
+      .then(r => r.json())
+      .then(d => { updateUI(d); setConn(true); })
+      .catch(() => setConn(false));
+  }
+
+  speed.addEventListener('input', () => { speedVal.textContent = speed.value; });
+  speed.addEventListener('change', () => sendSet({speed: speed.value}));
+  lscale.addEventListener('change', () => sendSet({lscale: lscale.value}));
+  rscale.addEventListener('change', () => sendSet({rscale: rscale.value}));
+  lrev.addEventListener('change', () => sendSet({lrev: lrev.checked ? 1 : 0}));
+  rrev.addEventListener('change', () => sendSet({rrev: rrev.checked ? 1 : 0}));
+  document.getElementById('btnStart').addEventListener('click', () => sendSet({run: 1}));
+  document.getElementById('btnStop').addEventListener('click', () => sendSet({run: 0}));
+
+  poll();
+  setInterval(poll, 400);
+</script>
+</body>
+</html>
+)HTMLPAGE";
+
+void handle_root()
+{
+    web_server.send_P(200, "text/html", HTML_PAGE);
+}
+
+void handle_api_status()
+{
+    web_server.send(200, "application/json", build_status_json());
+}
+
+// Same parameter set as the serial commands, just as query args:
+// speed, lscale, rscale, lrev, rrev, run. All optional - only the
+// ones present in the request get changed. Always replies with the
+// fresh status JSON so the caller can update its UI immediately.
+void handle_api_set()
+{
+    if (web_server.hasArg("speed"))
+    {
+        int val = web_server.arg("speed").toInt();
+
+        if (val < 0)   val = 0;
+        if (val > 255) val = 255;
+
+        base_speed = (uint8_t)val;
+    }
+
+    if (web_server.hasArg("lscale"))
+    {
+        left_scale = web_server.arg("lscale").toFloat();
+    }
+
+    if (web_server.hasArg("rscale"))
+    {
+        right_scale = web_server.arg("rscale").toFloat();
+    }
+
+    if (web_server.hasArg("lrev"))
+    {
+        left_invert = (web_server.arg("lrev").toInt() != 0);
+    }
+
+    if (web_server.hasArg("rrev"))
+    {
+        right_invert = (web_server.arg("rrev").toInt() != 0);
+    }
+
+    if (web_server.hasArg("run"))
+    {
+        if (web_server.arg("run").toInt() != 0)
+        {
+            motor_running = true;
+            start_time = millis();
+        }
+        else
+        {
+            motor_running = false;
+            stop_motors();
+        }
+    }
+
+    web_server.send(200, "application/json", build_status_json());
+}
+
+void handle_not_found()
+{
+    web_server.send(404, "text/plain", "Not found");
+}
+
+// Splits "CMD arg" into uppercase cmd + arg string. Returns cmd length (0 if empty).
+void handle_command(String line)
+{
+    line.trim();
+
+    if (line.length() == 0)
+    {
+        return;
+    }
+
+    int space_index = line.indexOf(' ');
+
+    String cmd = (space_index == -1) ? line : line.substring(0, space_index);
+    String arg = (space_index == -1) ? ""   : line.substring(space_index + 1);
+
+    cmd.trim();
+    arg.trim();
+    cmd.toUpperCase();
+
+    if (cmd == "SPEED")
+    {
+        int val = arg.toInt();
+
+        if (val < 0)   val = 0;
+        if (val > 255) val = 255;
+
+        base_speed = (uint8_t)val;
+
+        Serial.print("OK base_speed = ");
+        Serial.println(base_speed);
+    }
+    else if (cmd == "LSCALE")
+    {
+        left_scale = arg.toFloat();
+
+        Serial.print("OK left_scale = ");
+        Serial.println(left_scale, 3);
+    }
+    else if (cmd == "RSCALE")
+    {
+        right_scale = arg.toFloat();
+
+        Serial.print("OK right_scale = ");
+        Serial.println(right_scale, 3);
+    }
+    else if (cmd == "LREV")
+    {
+        left_invert = (arg.toInt() != 0);
+
+        Serial.print("OK left_invert = ");
+        Serial.println(left_invert ? "1 (reversed)" : "0 (normal)");
+    }
+    else if (cmd == "RREV")
+    {
+        right_invert = (arg.toInt() != 0);
+
+        Serial.print("OK right_invert = ");
+        Serial.println(right_invert ? "1 (reversed)" : "0 (normal)");
+    }
+    else if (cmd == "START")
+    {
+        motor_running = true;
+        start_time = millis();
+
+        Serial.println("OK motors started");
+    }
+    else if (cmd == "STOP")
+    {
+        motor_running = false;
+        stop_motors();
+
+        Serial.println("OK motors stopped");
+    }
+    else if (cmd == "STATUS")
+    {
+        print_status();
+    }
+    else if (cmd == "HELP")
+    {
+        print_help();
+    }
+    else
+    {
+        Serial.print("Unknown command: ");
+        Serial.println(cmd);
+        Serial.println("Type HELP for the list of commands.");
+    }
+}
+
+void process_serial_input()
+{
+    while (Serial.available() > 0)
+    {
+        char c = (char)Serial.read();
+
+        if (c == '\n')
+        {
+            handle_command(serial_line);
+            serial_line = "";
+        }
+        else if (c != '\r')
+        {
+            serial_line += c;
+        }
+    }
+}
+
+/*
+    =========================
+    SETUP
+    =========================
+*/
+
+void setup()
+{
+    Serial.begin(115200);
+
+#if HAS_LEFT_MOTOR
+    l298_init(&left_motor);
+#endif
+
+#if HAS_RIGHT_MOTOR
+    l298_init(&right_motor);
+#endif
+
+#if HAS_LEFT_ENCODER
+    encoder_init(&left_encoder);
+#endif
+
+#if HAS_RIGHT_ENCODER
+    encoder_init(&right_encoder);
+#endif
+
+    odometry_init(&odom);
+
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("DIFFERENTIAL DRIVE + ODOMETRY TEST");
+    Serial.println("================================");
+
+    Serial.print("Left motor:    ");
+    Serial.println(HAS_LEFT_MOTOR ? "ENABLED" : "disabled");
+
+    Serial.print("Right motor:   ");
+    Serial.println(HAS_RIGHT_MOTOR ? "ENABLED" : "disabled");
+
+    Serial.print("Left encoder:  ");
+    Serial.println(HAS_LEFT_ENCODER ? "ENABLED" : "disabled");
+
+    Serial.print("Right encoder: ");
+    Serial.println(HAS_RIGHT_ENCODER ? "ENABLED" : "disabled");
+
+    Serial.println();
+    print_help();
+    Serial.println();
+    print_status();
+
+    /*
+        Connect to Wi-Fi and start the web control panel
+    */
+
+    Serial.println();
+    Serial.print("Connecting to Wi-Fi: ");
+    Serial.println(WIFI_SSID);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    uint32_t wifi_start = millis();
+
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifi_start) < 15000)
+    {
+        delay(300);
+        Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.print("Wi-Fi connected. IP address: ");
+        Serial.println(WiFi.localIP());
+
+        if (MDNS.begin(MDNS_HOSTNAME))
+        {
+            Serial.print("Control panel also reachable at: http://");
+            Serial.print(MDNS_HOSTNAME);
+            Serial.println(".local/");
+        }
+        else
+        {
+            Serial.println("mDNS failed to start - use the IP address above instead.");
+        }
+
+        web_server.on("/", handle_root);
+        web_server.on("/api/status", handle_api_status);
+        web_server.on("/api/set", handle_api_set);
+        web_server.onNotFound(handle_not_found);
+
+        web_server.begin();
+
+        Serial.println("Web control panel started.");
+    }
+    else
+    {
+        Serial.println("Wi-Fi FAILED to connect - check WIFI_SSID/WIFI_PASSWORD.");
+        Serial.println("Falling back to serial-only control.");
+    }
+
+#if HAS_LEFT_ENCODER
+    encoder_reset(&left_encoder);
+#endif
+
+#if HAS_RIGHT_ENCODER
+    encoder_reset(&right_encoder);
+#endif
+
+    /*
+        Start motor(s) driving by default. Send STOP over serial to
+        halt them, or edit motor_running = false below if you'd
+        rather wait for a START command.
+    */
+
+    drive_motors(L298_FORWARD, base_speed);
+
+    motor_running = true;
+
+    start_time = millis();
+}
+
+/*
+    =========================
+    LOOP
+    =========================
+*/
+
+void loop()
+{
+    /*
+        Check for new serial commands every iteration
+    */
+
+    process_serial_input();
+    web_server.handleClient();
+
+    /*
+        Stop motor after test duration
+        (left commented out, same as the original test - re-enable
+        if you want an automatic timeout)
+    */
+
+    // if(
+    //     motor_running &&
+    //     (millis() - start_time >= TEST_DURATION_MS)
+    // )
+    // {
+    //     stop_motors();
+    //
+    //     motor_running = false;
+    //
+    //     Serial.println();
+    //     Serial.println("================================");
+    //     Serial.println("TEST COMPLETE");
+    //     Serial.println("MOTOR STOPPED");
+    //     Serial.println("================================");
+    // }
+
+    /*
+        Update odometry
+    */
+
+    // odometry_update(&odom);
+
+    if (motor_running)
+    {
+        drive_motors(L298_FORWARD, base_speed);
+    }
+
+    if (millis() - last_update_time >= 100)
+    {
+        last_update_time = millis(); // Reset the timer
+
+        // Update odometry
+        odometry_update(&odom);
+
+        // Read encoder ticks
+        #if HAS_LEFT_ENCODER
+            long left_ticks = encoder_get_ticks(&left_encoder);
+        #endif
+
+        #if HAS_RIGHT_ENCODER
+            long right_ticks = encoder_get_ticks(&right_encoder);
+        #endif
+
+        // Print diagnostics
+        #if HAS_LEFT_ENCODER
+            Serial.print("Left Ticks: ");
+            Serial.println(left_ticks);
+        #endif
+
+        #if HAS_RIGHT_ENCODER
+            Serial.print("Right Ticks: ");
+            Serial.println(right_ticks);
+        #endif
+
+        Serial.print("Left Motor RPM: ");
+        Serial.println(odom.data.left_motor_rpm);
+
+        Serial.print("Right Motor RPM: ");
+        Serial.println(odom.data.right_motor_rpm);
+
+        Serial.print("Left Wheel RPM: ");
+        Serial.println(odom.data.left_wheel_rpm);
+
+        Serial.print("Right Wheel RPM: ");
+        Serial.println(odom.data.right_wheel_rpm);
+
+        Serial.print("Left Wheel Velocity (m/s): ");
+        Serial.println(odom.data.left_velocity);
+
+        Serial.print("Right Wheel Velocity (m/s): ");
+        Serial.println(odom.data.right_velocity);
+
+        Serial.print("Linear Velocity (m/s): ");
+        Serial.println(odom.data.linear_velocity);
+
+        Serial.print("Angular Velocity (rad/s): ");
+        Serial.println(odom.data.angular_velocity);
+
+        Serial.print("Heading (deg): ");
+        Serial.println(degrees(odom.data.heading));
+
+        Serial.print("X (m): ");
+        Serial.println(odom.data.x);
+
+        Serial.print("Y (m): ");
+        Serial.println(odom.data.y);
+
+        Serial.print("Distance (m): ");
+        Serial.println(odom.data.distance);
+
+        Serial.println();
+    }
+    /*
+        Read encoder ticks
+    */
+
+// #if HAS_LEFT_ENCODER
+//     long left_ticks = encoder_get_ticks(&left_encoder);
+// #endif
+
+// #if HAS_RIGHT_ENCODER
+//     long right_ticks = encoder_get_ticks(&right_encoder);
+// #endif
+
+//     /*
+//         Print diagnostics
+//     */
+
+// #if HAS_LEFT_ENCODER
+//     Serial.print("Left Ticks: ");
+//     Serial.println(left_ticks);
+// #endif
+
+// #if HAS_RIGHT_ENCODER
+//     Serial.print("Right Ticks: ");
+//     Serial.println(right_ticks);
+// #endif
+
+//     Serial.print("Left Motor RPM: ");
+//     Serial.println(odom.data.left_motor_rpm);
+
+//     Serial.print("Right Motor RPM: ");
+//     Serial.println(odom.data.right_motor_rpm);
+
+//     Serial.print("Left Wheel RPM: ");
+//     Serial.println(odom.data.left_wheel_rpm);
+
+//     Serial.print("Right Wheel RPM: ");
+//     Serial.println(odom.data.right_wheel_rpm);
+
+//     Serial.print("Left Wheel Velocity (m/s): ");
+//     Serial.println(odom.data.left_velocity);
+
+//     Serial.print("Right Wheel Velocity (m/s): ");
+//     Serial.println(odom.data.right_velocity);
+
+//     Serial.print("Linear Velocity (m/s): ");
+//     Serial.println(odom.data.linear_velocity);
+
+//     Serial.print("Angular Velocity (rad/s): ");
+//     Serial.println(odom.data.angular_velocity);
+
+//     Serial.print("Heading (deg): ");
+//     Serial.println(degrees(odom.data.heading));
+
+//     Serial.print("X (m): ");
+//     Serial.println(odom.data.x);
+
+//     Serial.print("Y (m): ");
+//     Serial.println(odom.data.y);
+
+//     Serial.print("Distance (m): ");
+//     Serial.println(odom.data.distance);
+
+//     Serial.println();
+
+//     delay(100);
+}
+
+================
+File: hal_gpio.cpp
+================
+#include "hal_gpio.h"
+
+/*
+    Initialize GPIO pin
+*/
+
+void hal_gpio_init(
+    uint8_t pin,
+    hal_gpio_mode_t mode
+)
+{
+    switch(mode)
+    {
+        case HAL_GPIO_INPUT:
+            pinMode(pin, INPUT);
+            break;
+
+        case HAL_GPIO_OUTPUT:
+            pinMode(pin, OUTPUT);
+            break;
+
+        case HAL_GPIO_INPUT_PULLUP:
+            pinMode(pin, INPUT_PULLUP);
+            break;
+
+        default:
+            break;
+    }
+}
+
+/*
+    Write digital state
+*/
+
+void hal_gpio_write(
+    uint8_t pin,
+    hal_gpio_state_t state
+)
+{
+    digitalWrite(pin, state);
+}
+
+/*
+    Read digital state
+*/
+
+hal_gpio_state_t hal_gpio_read(
+    uint8_t pin
+)
+{
+    return (hal_gpio_state_t)digitalRead(pin);
+}
+
+/*
+    Toggle pin state
+*/
+
+void hal_gpio_toggle(
+    uint8_t pin
+)
+{
+    hal_gpio_state_t current;
+
+    current = hal_gpio_read(pin);
+
+    if(current == HAL_GPIO_HIGH)
+    {
+        hal_gpio_write(pin, HAL_GPIO_LOW);
+    }
+    else
+    {
+        hal_gpio_write(pin, HAL_GPIO_HIGH);
+    }
+}
+
+================
+File: hal_gpio.h
+================
+#pragma once
+
+#include <Arduino.h>
+
+/*
+    GPIO modes
+*/
+
+typedef enum
+{
+    HAL_GPIO_INPUT,
+    HAL_GPIO_OUTPUT,
+    HAL_GPIO_INPUT_PULLUP
+} hal_gpio_mode_t;
+
+/*
+    GPIO state values
+*/
+
+typedef enum
+{
+    HAL_GPIO_LOW = 0,
+    HAL_GPIO_HIGH = 1
+} hal_gpio_state_t;
+
+/*
+    Initialize GPIO pin
+*/
+
+void hal_gpio_init(
+    uint8_t pin,
+    hal_gpio_mode_t mode
+);
+
+/*
+    Write value to pin
+*/
+
+void hal_gpio_write(
+    uint8_t pin,
+    hal_gpio_state_t state
+);
+
+/*
+    Read value from pin
+*/
+
+hal_gpio_state_t hal_gpio_read(
+    uint8_t pin
+);
+
+/*
+    Toggle GPIO state
+*/
+
+void hal_gpio_toggle(
+    uint8_t pin
+);
+
+================
+File: hal_interrupt.cpp
+================
+#include "hal_interrupt.h"
+
+void hal_interrupt_attach(
+    uint8_t pin,
+    hal_interrupt_callback_t callback,
+    int mode
+)
+{
+    attachInterrupt(
+        digitalPinToInterrupt(pin),
+        callback,
+        mode
+    );
+}
+
+================
+File: hal_interrupt.h
+================
+#pragma once
+
+#include <Arduino.h>
+
+typedef void (*hal_interrupt_callback_t)(void);
+
+void hal_interrupt_attach(
+    uint8_t pin,
+    hal_interrupt_callback_t callback,
+    int mode
+);
+
+================
+File: hal_pwm.cpp
+================
+#include "hal_pwm.h"
+
+#ifdef ESP32
+
+/*
+    ESP32 implementation
+*/
+
+void hal_pwm_init(uint8_t pin)
+{
+    pinMode(pin, OUTPUT);
+}
+
+void hal_pwm_write(uint8_t pin, uint16_t value)
+{
+    // value 0–255
+    analogWrite(pin, value);
+}
+
+#elif defined(ARDUINO_ARCH_RP2350)
+
+/*
+     Pico implementation
+*/
+
+void hal_pwm_init(uint8_t pin)
+{
+    pinMode(pin, OUTPUT);
+}
+
+void hal_pwm_write(uint8_t pin, uint16_t value)
+{
+    analogWrite(pin, value);
+}
+
+#else
+
+#error "Unsupported platform"
+
+#endif
+
+================
+File: hal_pwm.h
+================
+#ifndef HAL_PWM_H
+#define HAL_PWM_H
+
+#pragma once
+#include <Arduino.h>
+
+void hal_pwm_init(uint8_t pin);
+void hal_pwm_write(uint8_t pin, uint16_t value);
+
+
+#endif
+
+================
+File: l289.cpp
+================
+#include "l289.h"
+
+#include "hal_gpio.h"
+#include "hal_pwm.h"
+
+/*
+    Initialize 
+*/
+
+void l298_init(
+    l298_motor_t* motor
+)
+{
+    hal_gpio_init(
+        motor->in1,
+        HAL_GPIO_OUTPUT
+    );
+
+    hal_gpio_init(
+        motor->in2,
+        HAL_GPIO_OUTPUT
+    );
+
+    hal_pwm_init(
+        motor->en
+    );
+
+    l298_stop(motor);
+}
+
+/*
+    Drive 
+*/
+
+void l298_drive(
+    l298_motor_t* motor,
+    l298_direction_t direction,
+    uint8_t speed
+)
+{
+    switch(direction)
+    {
+        case L298_FORWARD:
+
+            hal_gpio_write(
+                motor->in1,
+                HAL_GPIO_HIGH
+            );
+
+            hal_gpio_write(
+                motor->in2,
+                HAL_GPIO_LOW
+            );
+
+            break;
+
+        case L298_REVERSE:
+
+            hal_gpio_write(
+                motor->in1,
+                HAL_GPIO_LOW
+            );
+
+            hal_gpio_write(
+                motor->in2,
+                HAL_GPIO_HIGH
+            );
+
+            break;
+
+        case L298_BRAKE:
+
+            hal_gpio_write(
+                motor->in1,
+                HAL_GPIO_HIGH
+            );
+
+            hal_gpio_write(
+                motor->in2,
+                HAL_GPIO_HIGH
+            );
+
+            break;
+
+        case L298_COAST:
+
+            hal_gpio_write(
+                motor->in1,
+                HAL_GPIO_LOW
+            );
+
+            hal_gpio_write(
+                motor->in2,
+                HAL_GPIO_LOW
+            );
+
+            break;
+
+        default:
+            break;
+    }
+
+    hal_pwm_write(
+        motor->en,
+        speed
+    );
+}
+
+/*
+    Stop motor
+*/
+
+void l298_stop(
+    l298_motor_t* motor
+)
+{
+    hal_gpio_write(
+        motor->in1,
+        HAL_GPIO_LOW
+    );
+
+    hal_gpio_write(
+        motor->in2,
+        HAL_GPIO_LOW
+    );
+
+    hal_pwm_write(
+        motor->en,
+        0
+    );
+}
+
+================
+File: l289.h
+================
+#pragma once
+
+#include <Arduino.h>
+
+/*
+    Motor direction
+*/
+
+typedef enum
+{
+    L298_FORWARD,
+    L298_REVERSE,
+    L298_BRAKE,
+    L298_COAST
+} l298_direction_t;
+
+/*
+    L298 motor object
+*/
+
+typedef struct
+{
+    uint8_t in1;
+    uint8_t in2;
+    uint8_t en;
+
+} l298_motor_t;
+
+/*
+    Initialize motor driver
+*/
+
+void l298_init(
+    l298_motor_t* motor
+);
+
+/*
+    Set motor output
+*/
+
+void l298_drive(
+    l298_motor_t* motor,
+    l298_direction_t direction,
+    uint8_t speed
+);
+
+/*
+    Stop motor
+*/
+
+void l298_stop(
+    l298_motor_t* motor
+);
+
+================
+File: odometry.cpp
+================
+#include "odometry.h"
+#include <math.h>
+
+/*
+    PI constant
+*/
+
+#define PI_F 3.14159265359f
+
+/*
+    Initialize odometry
+*/
+
+void odometry_init(odometry_t* odom)
+{
+    /*
+        Null pointer protection
+    */
+
+    if(odom == nullptr)
+    {
+        return;
+    }
+
+    /*
+        Initialize previous encoder ticks safely
+    */
+
+    if(odom->left_encoder != nullptr)
+    {
+        odom->prev_left_ticks =
+            encoder_get_ticks(
+                odom->left_encoder
+            );
+    }
+    else
+    {
+        odom->prev_left_ticks = 0;
+    }
+
+    if(odom->right_encoder != nullptr)
+    {
+        odom->prev_right_ticks =
+            encoder_get_ticks(
+                odom->right_encoder
+            );
+    }
+    else
+    {
+        odom->prev_right_ticks = 0;
+    }
+
+    /*
+        Initialize timing
+    */
+
+    odom->prev_time_ms = millis();
+
+    /*
+        Reset pose
+    */
+
+    odom->data.x = 0.0f;
+    odom->data.y = 0.0f;
+    odom->data.heading = 0.0f;
+    odom->data.distance = 0.0f;
+
+    /*
+        Reset velocities
+    */
+
+    odom->data.left_motor_rpm = 0.0f;
+    odom->data.right_motor_rpm = 0.0f;
+
+    odom->data.left_wheel_rpm = 0.0f;
+    odom->data.right_wheel_rpm = 0.0f;
+
+    odom->data.left_velocity = 0.0f;
+    odom->data.right_velocity = 0.0f;
+
+    odom->data.linear_velocity = 0.0f;
+    odom->data.angular_velocity = 0.0f;
+}
+
+/*
+    Update odometry
+*/
+
+void odometry_update(odometry_t* odom)
+{
+    /*
+        Null protection
+    */
+
+    if(odom == nullptr)
+    {
+        return;
+    }
+
+    /*
+        Validate configuration
+    */
+
+    if(odom->ticks_per_motor_rev <= 0.0f)
+    {
+        return;
+    }
+
+    if(odom->gear_ratio <= 0.0f)
+    {
+        return;
+    }
+
+    if(odom->wheel_radius <= 0.0f)
+    {
+        return;
+    }
+
+    /*
+        Current time
+    */
+
+    uint32_t current_time = millis();
+
+    float dt =
+        (current_time - odom->prev_time_ms)
+        / 1000.0f;
+
+    /*
+        Prevent divide by zero
+    */
+
+    if(dt <= 0.0f)
+    {
+        return;
+    }
+
+    /*
+        Read encoder ticks safely
+    */
+
+    long left_ticks = 0;
+    long right_ticks = 0;
+
+    if(odom->left_encoder != nullptr)
+    {
+        left_ticks =
+            encoder_get_ticks(
+                odom->left_encoder
+            );
+    }
+
+    if(odom->right_encoder != nullptr)
+    {
+        right_ticks =
+            encoder_get_ticks(
+                odom->right_encoder
+            );
+    }
+
+    /*
+        Tick deltas
+    */
+
+    long delta_left =
+        left_ticks -
+        odom->prev_left_ticks;
+
+    long delta_right =
+        right_ticks -
+        odom->prev_right_ticks;
+
+    /*
+        Save current state
+    */
+
+    odom->prev_left_ticks =
+        left_ticks;
+
+    odom->prev_right_ticks =
+        right_ticks;
+
+    odom->prev_time_ms =
+        current_time;
+
+    /*
+        Motor RPM
+    */
+
+    odom->data.left_motor_rpm =
+        ((float)delta_left /
+        odom->ticks_per_motor_rev)
+        * (60.0f / dt);
+
+    odom->data.right_motor_rpm =
+        ((float)delta_right /
+        odom->ticks_per_motor_rev)
+        * (60.0f / dt);
+
+    /*
+        Wheel RPM
+    */
+
+    odom->data.left_wheel_rpm =
+        odom->data.left_motor_rpm /
+        odom->gear_ratio;
+
+    odom->data.right_wheel_rpm =
+        odom->data.right_motor_rpm /
+        odom->gear_ratio;
+
+    /*
+        Wheel linear velocity
+    */
+
+    float wheel_circumference =
+        2.0f * PI_F *
+        odom->wheel_radius;
+
+    odom->data.left_velocity =
+        (odom->data.left_wheel_rpm *
+        wheel_circumference)
+        / 60.0f;
+
+    odom->data.right_velocity =
+        (odom->data.right_wheel_rpm *
+        wheel_circumference)
+        / 60.0f;
+
+    /*
+        Single encoder mode
+    */
+
+    bool left_exists =
+        (odom->left_encoder != nullptr);
+
+    bool right_exists =
+        (odom->right_encoder != nullptr);
+
+    /*
+        Differential drive mode
+    */
+
+    if(
+        left_exists &&
+        right_exists &&
+        odom->wheel_base > 0.0f
+    )
+    {
+        odom->data.linear_velocity =
+            (
+                odom->data.left_velocity +
+                odom->data.right_velocity
+            ) * 0.5f;
+
+        odom->data.angular_velocity =
+            (
+                odom->data.right_velocity -
+                odom->data.left_velocity
+            ) / odom->wheel_base;
+
+        /*
+            Pose update
+        */
+
+        odom->data.heading +=
+            odom->data.angular_velocity * dt;
+
+        odom->data.x +=
+            odom->data.linear_velocity *
+            cos(odom->data.heading) *
+            dt;
+
+        odom->data.y +=
+            odom->data.linear_velocity *
+            sin(odom->data.heading) *
+            dt;
+
+        /*
+            Distance update
+        */
+
+        odom->data.distance +=
+            fabs(
+                odom->data.linear_velocity
+            ) * dt;
+    }
+
+    /*
+        Single wheel mode
+    */
+
+    else
+    {
+        /*
+            Use whichever wheel exists
+        */
+
+        if(right_exists)
+        {
+            odom->data.linear_velocity =
+                odom->data.right_velocity;
+
+            odom->data.distance +=
+                fabs(
+                    odom->data.right_velocity
+                ) * dt;
+        }
+        else if(left_exists)
+        {
+            odom->data.linear_velocity =
+                odom->data.left_velocity;
+
+            odom->data.distance +=
+                fabs(
+                    odom->data.left_velocity
+                ) * dt;
+        }
+
+        /*
+            No angular estimation
+        */
+
+        odom->data.angular_velocity = 0.0f;
+    }
+}
+
+================
+File: odometry.h
+================
+#pragma once
+
+#include <Arduino.h>
+#include "encoder.h"
+
+//Odometry data
+typedef struct
+{
+    //Raw RPM
+    float left_motor_rpm;
+    float right_motor_rpm;
+
+    //Actual wheel RPM
+    float left_wheel_rpm;
+    float right_wheel_rpm;
+
+    //Linear wheel velocities
+    float left_velocity;
+    float right_velocity;
+
+    //Robot velocities
+    float linear_velocity;
+    float angular_velocity;
+
+    //Robot pose
+    float x;
+    float y;
+    float heading;
+
+    float distance;
+} odometry_data_t;
+
+//Odometry object
+
+
+typedef struct
+{
+    encoder_t* left_encoder;
+    encoder_t* right_encoder;
+    //Encoder configuration
+    float ticks_per_motor_rev;
+    
+    //Gear ratio
+    float gear_ratio;
+
+    //Wheel radius (meters)
+    float wheel_radius;
+
+    //Distance between wheels
+    float wheel_base;
+
+    //Previous encoder ticks
+    long prev_left_ticks;
+    long prev_right_ticks;
+
+    //Previous update time
+    uint32_t prev_time_ms;
+
+    //Output data
+    odometry_data_t data;
+
+} odometry_t;
+
+/*
+    Initialize odometry
+*/
+
+void odometry_init(odometry_t* odom);
+
+/*
+    Update odometry
+*/
+
+void odometry_update(odometry_t* odom);
+
+
+
+
+
+================================================================
+End of Codebase
+================================================================

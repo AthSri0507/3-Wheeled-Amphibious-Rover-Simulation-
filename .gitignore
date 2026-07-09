@@ -39,3 +39,14 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+mujoco/metrics.py
+ARCHITECTURE.md
+figures/actions.png
+figures/completion.png
+figures/metrics.txt
+figures/mode_timeline.png
+mujoco/plots.py
+figures/trajectory.png
+figures/terrain_probs.png
+figures/robustness_current.png
+figures/summary.png
