@@ -1,101 +1,153 @@
-# Amphibious Triangular Rover
+# Diff-Drive Rover — Separated Architecture
 
-A simulation of a three-wheeled amphibious rover. The rover drives on land on three
-wheels, and when it enters water its two front arms swing out for stability while the
-rear wheel rotates 90° to act as a propeller. The same vehicle is modelled in two
-simulators: the original Webots world, and a MuJoCo port with a custom buoyancy model.
-
-## The vehicle
-
-- **Chassis** with an electronics box, a camera, and an IMU.
-- **Two front arms**, each with a tilt joint and a driven wheel. On land the wheels
-  hang down and roll; in water the arms splay outward.
-- **Rear pod** on a swivel joint, carrying a wheel that tilts into a propeller for
-  water propulsion. The swivel steers the craft like an outboard motor.
-
-Seven actuated joints in total (three wheel drives, two arm tilts, the rear swivel,
-and the propeller tilt), plus position sensors and an IMU.
-
-## Tools used
-
-- **MuJoCo 3.9** (Python bindings) — physics simulation and viewer.
-- **Webots R2025a** — the original simulation world (`rover_terrain.wbt`).
-- **Python 3.10** with **NumPy** — control logic and the buoyancy model.
-- **Pillow** — generates the terrain heightfield (`beach.png`).
-- **STL meshes** exported from CAD, shared by both simulators.
-
-## Repository layout
+ESP32-based differential drive rover with a **standalone web controller**.
 
 ```
-.
-├── rover_terrain.wbt        # Webots world
-├── rover_controller.py      # Webots controller (keyboard driving)
-├── *.STL                    # CAD meshes (chassis, arms, wheels, rear assembly)
-├── beach.png                # terrain heightfield used by the MuJoCo scene
-└── mujoco/
-    ├── rover.xml            # MJCF model (geometry, joints, actuators, scene)
-    ├── rover_sim.py         # controller + buoyancy model + viewer / demo
-    ├── make_terrain.py      # regenerates beach.png
-    └── README.md            # details of the MuJoCo model and water model
+┌─────────────────┐         WiFi (HTTP)         ┌─────────────────────┐
+│   ESP32 Board   │ ◄──────────────────────────► │  Browser Frontend   │
+│  firmware/      │   POST /api/drive            │  frontend/          │
+│  (API server)   │   POST /api/config           │  (WASD controller)  │
+│                 │   POST /api/estop            │                     │
+│                 │   GET  /api/status           │                     │
+└─────────────────┘                              └─────────────────────┘
 ```
 
-## Requirements
+---
 
-- Python 3.10 or newer
-- Install the Python dependencies:
+## Quick Start
 
-  ```bash
-  pip install mujoco numpy pillow
-  ```
+### 1. Flash the Firmware
 
-- Optional: **Webots R2025a** if you want to run the original world.
+**Requirements:**
+- [Arduino IDE](https://www.arduino.cc/en/software) (2.x recommended)
+- ESP32 Board Package — install via Arduino IDE Board Manager:
+  - Go to **File → Preferences**, add this to "Additional Board Manager URLs":
+    ```
+    https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    ```
+  - Go to **Tools → Board → Board Manager**, search "esp32", install **esp32 by Espressif Systems**
 
-## Usage
+**Libraries used** (all bundled with the ESP32 board package — no extra installs needed):
+- `WiFi.h`
+- `WebServer.h`
+- `ESPmDNS.h`
 
-### MuJoCo
+**Steps:**
+1. Open `firmware/esp_server.ino` in Arduino IDE
+2. Edit the WiFi credentials at the top of the file:
+   ```cpp
+   #define WIFI_SSID     "YOUR_WIFI_SSID"
+   #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+   ```
+3. Select your board: **Tools → Board → ESP32 Dev Module** (or your specific board)
+4. Select the correct COM port: **Tools → Port**
+5. Click **Upload**
+6. Open **Serial Monitor** at 115200 baud — note the IP address printed on boot
 
-Run everything from the project root (the folder containing both `mujoco/` and the
-`.STL` files) so the mesh and terrain paths resolve.
+### 2. Open the Frontend
 
-```bash
-# interactive viewer — drive it yourself
-python mujoco/rover_sim.py
+No build tools or installation required.
 
-# scripted land-to-water demo (opens a window)
-python mujoco/rover_sim.py --demo
+1. Open `frontend/index.html` in any modern browser (Chrome, Firefox, Edge)
+2. Enter the ESP32's IP address (from Serial Monitor) in the connection field
+3. Start driving with **WASD keys**!
 
-# same demo with no window, prints telemetry only
-python mujoco/rover_sim.py --demo --headless
+> **Tip:** You can also double-click `index.html` to open it directly. Alternatively, use `diffdrive.local` as the hostname if your network supports mDNS.
+
+---
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| **W** | Drive forward (throttle = +1.0) |
+| **S** | Drive backward (throttle = -1.0) |
+| **A** | Turn left (steering = -1.0) |
+| **D** | Turn right (steering = +1.0) |
+| **W+A** | Forward-left arc |
+| **W+D** | Forward-right arc |
+| **Spacebar** | Emergency stop |
+| **Release all** | Stop |
+
+On-screen buttons also work for mobile/touch control.
+
+---
+
+## API Reference
+
+All state-changing endpoints accept **POST** requests. Parameters are passed as query strings.
+
+### `POST /api/drive`
+
+Drive using the differential mixer.
+
+| Param | Type | Range | Description |
+|-------|------|-------|-------------|
+| `throttle` | float | -1.0 to +1.0 | Forward/reverse |
+| `steering` | float | -1.0 to +1.0 | Left/right turn |
+
+### `GET /api/status`
+
+Returns telemetry JSON with all sensor data, configuration, and motor state.
+
+### `POST /api/config`
+
+Set configuration parameters (all optional):
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `speed` | int (0–255) | Base PWM speed |
+| `lscale` | float | Left motor scale multiplier |
+| `rscale` | float | Right motor scale multiplier |
+| `lrev` | 0 or 1 | Reverse left motor direction |
+| `rrev` | 0 or 1 | Reverse right motor direction |
+
+### `POST /api/estop`
+
+Emergency stop. Immediately kills both motors and clears all drive state. No parameters.
+
+---
+
+## Safety Features
+
+- **500ms command timeout** — if the firmware receives no `/api/drive` within 500ms, motors auto-stop (prevents runaways on WiFi drop)
+- **E-Stop** — dedicated emergency stop endpoint + keyboard shortcut (spacebar)
+- **Motors start stopped** — must explicitly send a drive command to move
+
+---
+
+## Pin Wiring Reference
+
+| Signal | Pin | Notes |
+|--------|-----|-------|
+| Left Motor IN1 | 32 | |
+| Left Motor IN2 | 26 | |
+| Left Motor EN | 13 | PWM |
+| Right Motor IN1 | 25 | |
+| Right Motor IN2 | 14 | |
+| Right Motor EN | 33 | PWM |
+| Left Encoder A | 22 | |
+| Left Encoder B | 23 | |
+| Right Encoder A | 18 | |
+| Right Encoder B | 21 | |
+
+Edit `HAS_LEFT_MOTOR`, `HAS_RIGHT_MOTOR`, etc. flags in `esp_server.ino` to disable any unconnected hardware.
+
+---
+
+## Serial Commands (debugging)
+
+Connect via Serial Monitor at 115200 baud. Same commands still work alongside the web API:
+
 ```
-
-The terrain is a beach that ramps down into a water basin. Drive off the beach and the
-rover deploys its arms and propeller automatically as it begins to float, then retracts
-again when it climbs back onto land.
-
-#### Controls
-
-Driving uses the **arrow keys** (W/A/S/D are reserved by the MuJoCo viewer). A key press
-stays in effect until you change it. Click the 3D window first.
-
-| Mode  | Keys |
-|-------|------|
-| Land  | `↑`/`↓` forward/back · `←`/`→` pivot turn · `Q`/`E` arc turn · `Space` stop |
-| Water | `↑`/`↓` propel · `←`/`→` steer · `Space` stop |
-| Any   | `T` force water · `G` force land · `F` automatic |
-
-To inspect the model on its own, the standalone MuJoCo `simulate` viewer can open
-`mujoco/rover.xml` directly (drag-and-drop), but it shows the model only — the driving
-and buoyancy run through `rover_sim.py`.
-
-### Webots
-
-Open `rover_terrain.wbt` in Webots and run the simulation; `rover_controller.py` reads
-the keyboard for driving.
-
-## Model and water notes
-
-MuJoCo has no built-in water surface, so buoyancy, hydrodynamic drag, and propeller
-thrust are applied as external forces each step for the parts of the rover below the
-waterline. The detailed STL meshes are used for visuals while collision uses simple box
-and cylinder primitives. See `mujoco/README.md` for the full description of the model,
-the water model, and the tuning parameters.
+SPEED <0-255>     Set base speed
+LSCALE <float>    Set left motor scale
+RSCALE <float>    Set right motor scale
+LREV <0|1>        Reverse left motor
+RREV <0|1>        Reverse right motor
+DRIVE <T> <S>     Set throttle and steering (-1.0 to 1.0)
+STOP              Stop motors
+ESTOP             Emergency stop
+STATUS            Print current config
+HELP              List commands
+```
